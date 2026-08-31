@@ -4,16 +4,14 @@
 Workflow:
 1. MR.Jobs discovers and scores opportunities.
 2. This worker finds high-scoring matched jobs.
-3. It generates tailored application content.
+3. It generates a truthful tailored ATS PDF and cover letter.
 4. It sends KD a Telegram YES/NO approval card.
-5. YES submits the application; NO skips it.
-
-The worker never stores Telegram credentials in git. It reads them from env vars.
+5. YES submits with the tailored PDF; NO skips it.
 """
 
 import argparse
 import asyncio
-import json
+import copy
 import yaml
 from pathlib import Path
 
@@ -32,11 +30,13 @@ from utils.kd_approval_state import (
 )
 from utils.resume_parser import extract_resume_text
 from utils.resume_tailor import tailor_resume
+from utils.resume_pdf import render_tailored_resume_pdf
 from utils.telegram_approval import TelegramApproval
 from utils.tracker import (
     get_job_by_id,
     get_jobs_by_status,
     get_tailored_resume,
+    get_today_count,
     log_applied,
     log_skipped,
     update_tailored_resume,
@@ -67,6 +67,9 @@ async def queue_high_matches(profile: dict) -> int:
     telegram.require_configured()
 
     base_resume_text = extract_resume_text(profile.get("resume_path", ""))
+    if not base_resume_text:
+        raise RuntimeError("Master resume could not be read; refusing to generate applications.")
+
     brain = ClaudeBrain(verbose=False, profile=profile)
     candidates = [
         j for j in get_jobs_by_status("matched")
@@ -78,15 +81,29 @@ async def queue_high_matches(profile: dict) -> int:
     for job in candidates[:max_packets]:
         description = job.get("description") or ""
         tailored = tailor_resume(description, base_resume_text, profile, brain=brain)
+        if tailored.get("error"):
+            print(f"Tailoring warning for {job['id']}: {tailored['error']}")
+
+        tailored_pdf = render_tailored_resume_pdf(
+            tailored,
+            profile,
+            job,
+            base_resume_text=base_resume_text,
+        )
+        tailored["generated_pdf_path"] = tailored_pdf
         update_tailored_resume(job["id"], tailored)
 
         nonce, message_id = await telegram.send_job_for_approval(
             job,
+            tailored_resume_path=tailored_pdf,
             tailored_summary=tailored.get("tailored_summary", ""),
         )
         create_waiting(job["id"], nonce, message_id)
         queued += 1
-        print(f"Queued for KD approval: {job['title']} @ {job['company']} ({job['match_score']})")
+        print(
+            f"Queued for KD approval: {job['title']} @ {job['company']} "
+            f"({job['match_score']}) — {tailored_pdf}"
+        )
 
     return queued
 
@@ -97,28 +114,34 @@ async def submit_job(profile: dict, job_id: str) -> bool:
         raise RuntimeError(f"Job not found: {job_id}")
 
     rate_limits = profile.get("rate_limits", {})
+    max_per_day = int(rate_limits.get("max_applications_per_day", 5))
+    if get_today_count() >= max_per_day:
+        raise RuntimeError(f"Daily application limit reached ({max_per_day}).")
+
     approval_cfg = profile.get("approval", {})
     headless = bool(approval_cfg.get("headless_submission", True))
-
     tailored = get_tailored_resume(job_id) or {}
-    cover_letter = (
-        tailored.get("tailored_cover_letter")
-        or job.get("cover_letter")
-        or ""
-    )
+    tailored_pdf = tailored.get("generated_pdf_path", "")
+    if not tailored_pdf or not Path(tailored_pdf).exists():
+        raise RuntimeError("Tailored resume PDF is missing; refusing live submission.")
 
-    brain = ClaudeBrain(verbose=True, profile=profile)
+    cover_letter = tailored.get("tailored_cover_letter") or job.get("cover_letter") or ""
+
+    # Give the adapter a copy of the profile whose resume path points to the
+    # job-specific generated PDF. The private master resume is never modified.
+    submit_profile = copy.deepcopy(profile)
+    submit_profile["resume_path"] = tailored_pdf
+
+    brain = ClaudeBrain(verbose=True, profile=submit_profile)
     async with async_playwright() as p:
         browser = await p.chromium.launch(headless=headless, slow_mo=50)
-        context = await browser.new_context(
-            viewport={"width": 1920, "height": 1080}
-        )
+        context = await browser.new_context(viewport={"width": 1920, "height": 1080})
         page = await context.new_page()
         try:
             success = await apply_smart(
                 page,
                 job.get("apply_url") or job.get("url"),
-                profile,
+                submit_profile,
                 brain,
                 cover_letter=cover_letter,
                 dry_run=False,
@@ -161,9 +184,7 @@ async def process_telegram_decisions(profile: dict) -> int:
         if not approved:
             job = get_job_by_id(job_id) or {}
             log_skipped(job_id, "Declined by KD")
-            await telegram.acknowledge(
-                decision.get("callback_query_id", ""), "Skipped."
-            )
+            await telegram.acknowledge(decision.get("callback_query_id", ""), "Skipped.")
             print(f"KD declined: {job.get('title')} @ {job.get('company')}")
             processed += 1
             continue
