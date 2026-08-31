@@ -1,10 +1,11 @@
 # KD Job Hunter profile template
 # Copy this file to profile.yaml on the machine running the agent.
-# profile.yaml is already gitignored because it contains private information.
+# profile.yaml is gitignored because it contains private information.
 
 personal:
   first_name: YOUR_FIRST_NAME
   last_name: YOUR_LAST_NAME
+  display_name: YOUR_DISPLAY_NAME
   email: YOUR_EMAIL
   phone: YOUR_PHONE
   location: New York, NY
@@ -65,7 +66,6 @@ common_answers:
   veteran_status: Prefer not to say
   disability_status: Prefer not to say
 
-# Direct ATS boards can be added as we identify each company's board slug.
 target_boards:
   greenhouse: []
   lever: []
@@ -151,7 +151,6 @@ favorite_companies:
 
 custom_career_pages: []
 
-# Deliberately conservative. This is not a spray-and-pray application bot.
 rate_limits:
   max_applications_per_day: 5
   min_delay_seconds: 90
@@ -169,7 +168,6 @@ email:
   app_password: ''
   check_interval_hours: 12
 
-# KD approval gate. No live submission happens from this workflow until KD presses YES.
 approval:
   enabled: true
   min_score: 82
@@ -181,20 +179,20 @@ approval:
     bot_token_env: KD_JOB_HUNTER_TELEGRAM_BOT_TOKEN
     chat_id_env: KD_JOB_HUNTER_TELEGRAM_CHAT_ID
 
-# Use whichever backend is configured on the runtime machine.
+# Uses the same kind of OpenAI API key already used by Johnny 5.
 ai:
-  default_backend: claude_cli
+  default_backend: openai
   backends:
+    openai:
+      api_key: ${OPENAI_API_KEY}
+      model: gpt-4o-mini
+      timeout: 120
     claude_cli:
       timeout: 120
-    # openai:
-    #   api_key: ${OPENAI_API_KEY}
-    #   model: gpt-4o
-    #   timeout: 60
   components:
-    scoring: claude_cli
-    cover_letter: claude_cli
-    resume_tailoring: claude_cli
-    form_analysis: claude_cli
-    email_classification: claude_cli
-    profile_analysis: claude_cli
+    scoring: openai
+    cover_letter: openai
+    resume_tailoring: openai
+    form_analysis: openai
+    email_classification: openai
+    profile_analysis: openai
