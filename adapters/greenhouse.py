@@ -7,6 +7,7 @@ Greenhouse forms are semi-standardized:
 """
 
 import random
+import re
 from playwright.async_api import Page
 from utils.brain import ClaudeBrain
 from utils.answers import find_cached_answer, get_personal_field
@@ -158,6 +159,11 @@ async def apply_greenhouse(
                     continue
 
             # Fall back to Claude
+            sensitive = re.search(r"(authoriz|sponsor|visa|relocat|salary|compensation|pay|start date|earliest start|gender|race|ethnic|veteran|disabil|citizen|nationality|age|over 18|criminal|conviction|felony|background check|security clearance)", label_text.lower())
+            if sensitive:
+                print(f"    SENSITIVE FIELD BLOCKED: {label_text[:60]}")
+                continue
+
             input_el = await field_el.query_selector('input, textarea, select')
             if input_el:
                 tag = await input_el.evaluate('el => el.tagName.toLowerCase()')

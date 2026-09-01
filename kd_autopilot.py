@@ -71,9 +71,13 @@ async def queue_high_matches(profile: dict) -> int:
         raise RuntimeError("Master resume could not be read; refusing to generate applications.")
 
     brain = ClaudeBrain(verbose=False, profile=profile)
+    from utils.url_resolver import is_ats_url
+
     candidates = [
         j for j in get_jobs_by_status("matched")
-        if int(j.get("match_score") or 0) >= min_score and not get_by_job(j["id"])
+        if int(j.get("match_score") or 0) >= min_score
+        and not get_by_job(j["id"])
+        and is_ats_url(j.get("apply_url") or j.get("url") or "")
     ]
     candidates.sort(key=lambda j: int(j.get("match_score") or 0), reverse=True)
 
