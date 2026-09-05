@@ -1758,6 +1758,10 @@ async def apply_smart(
         except Exception as e:
             print(f"  [!] CLI adapter error: {e}, trying generic adapter...")
 
+    if not dry_run:
+        print("  [!] Generic live fallback disabled for safety")
+        return False
+
     # Generic: CSS-selector based AI form filler (last resort)
     print("  [*] Adapter: Generic (CSS + AI fallback)")
     from adapters.generic import apply_generic

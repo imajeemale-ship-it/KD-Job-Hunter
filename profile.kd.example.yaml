@@ -1,0 +1,198 @@
+# KD Job Hunter profile template
+# Copy this file to profile.yaml on the machine running the agent.
+# profile.yaml is gitignored because it contains private information.
+
+personal:
+  first_name: YOUR_FIRST_NAME
+  last_name: YOUR_LAST_NAME
+  display_name: YOUR_DISPLAY_NAME
+  email: YOUR_EMAIL
+  phone: YOUR_PHONE
+  location: New York, NY
+  linkedin: YOUR_LINKEDIN
+  github: YOUR_GITHUB
+  portfolio: ''
+
+# Keep the actual resume local/private. Do NOT commit it to this public repo.
+resume_path: ./resumes/master_resume.pdf
+
+preferences:
+  roles:
+    - Music Business Development
+    - Strategic Partnerships
+    - Artist Partnerships
+    - Music Marketing
+    - A&R
+    - Creative Strategy
+    - Creator Partnerships
+    - Music Product Strategy
+    - Label Relations
+    - Publishing Partnerships
+    - Entertainment Business Development
+    - AI Partnerships
+    - Music Technology Partnerships
+  keywords:
+    - music
+    - entertainment
+    - artist partnerships
+    - strategic partnerships
+    - business development
+    - licensing
+    - publishing
+    - recorded music
+    - music rights
+    - creators
+    - AI
+    - generative AI
+    - music technology
+  min_match_score: 82
+  remote_only: false
+  locations:
+    - New York, NY
+    - Los Angeles, CA
+    - Remote
+  exclude_companies: []
+
+common_answers:
+  authorized_to_work: 'Yes'
+  require_sponsorship: 'No'
+  years_experience: '20+'
+  willing_to_relocate: Open to discussion
+  salary_expectation: Open to discuss based on total compensation
+  earliest_start_date: Open to discussion
+  how_did_you_hear: Online job search
+  gender: Prefer not to say
+  race_ethnicity: Prefer not to say
+  veteran_status: Prefer not to say
+  disability_status: Prefer not to say
+
+target_boards:
+  greenhouse: []
+  lever: []
+
+search:
+  enabled: true
+  queries:
+    - Music Partnerships
+    - Music Business Development
+    - Artist Partnerships
+    - Music Marketing
+    - Creator Partnerships
+    - Music Technology
+    - AI Music
+    - Entertainment Partnerships
+    - Label Relations
+    - Publishing Partnerships
+  locations:
+    - New York, NY
+    - Los Angeles, CA
+    - Remote
+  distance_miles: 50
+  results_per_query: 25
+  salary_min: 120000
+
+skills:
+  primary:
+    - Music business development
+    - Strategic partnerships
+    - Artist relations
+    - A&R
+    - Music marketing
+    - Licensing
+    - Publishing
+    - Recorded music rights
+    - Deal negotiation
+    - Cross-functional project management
+    - AI workflows
+  secondary:
+    - GitHub
+    - OpenAI
+    - AI agents
+    - Prompt engineering
+    - Product collaboration
+    - Creative strategy
+    - Music production
+    - Live events
+
+ideal_job_description: >
+  Senior or manager-level role at the intersection of music, entertainment,
+  technology, AI, artists, creators, partnerships, licensing, rights, product,
+  or business development. Strong preference for roles where deep music-industry
+  relationships and hands-on AI fluency are an advantage. Target total cash
+  compensation generally $150k+ when available, but do not reject unusually
+  strong strategic opportunities solely because compensation is not posted.
+
+favorite_companies:
+  - Suno
+  - OpenAI
+  - Anthropic
+  - Spotify
+  - Apple
+  - YouTube
+  - Google
+  - Universal Music Group
+  - Warner Music Group
+  - Sony Music Entertainment
+  - BMG
+  - Kobalt
+  - Downtown Music
+  - UnitedMasters
+  - gamma.
+  - Create Music Group
+  - SoundCloud
+  - TikTok
+  - ByteDance
+  - Live Nation
+  - AEG
+  - Adobe
+  - Runway
+  - ElevenLabs
+  - NVIDIA
+
+custom_career_pages: []
+
+rate_limits:
+  max_applications_per_day: 5
+  min_delay_seconds: 90
+  max_delay_seconds: 240
+
+schedule:
+  discover_interval_hours: 6
+  score_interval_minutes: 30
+  enabled: true
+
+email:
+  enabled: false
+  imap_server: imap.gmail.com
+  email: ''
+  app_password: ''
+  check_interval_hours: 12
+
+approval:
+  enabled: true
+  min_score: 82
+  max_packets_per_cycle: 5
+  poll_interval_seconds: 30
+  decision_timeout_seconds: 43200
+  headless_submission: true
+  telegram:
+    bot_token_env: KD_JOB_HUNTER_TELEGRAM_BOT_TOKEN
+    chat_id_env: KD_JOB_HUNTER_TELEGRAM_CHAT_ID
+
+# Uses the same kind of OpenAI API key already used by Johnny 5.
+ai:
+  default_backend: openai
+  backends:
+    openai:
+      api_key: ${OPENAI_API_KEY}
+      model: gpt-4o-mini
+      timeout: 120
+    claude_cli:
+      timeout: 120
+  components:
+    scoring: openai
+    cover_letter: openai
+    resume_tailoring: openai
+    form_analysis: openai
+    email_classification: openai
+    profile_analysis: openai
