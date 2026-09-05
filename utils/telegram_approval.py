@@ -41,6 +41,24 @@ class TelegramApproval:
     def nonce_for(job_id: str) -> str:
         return hashlib.sha256(job_id.encode("utf-8")).hexdigest()[:16]
 
+    async def send_status(self, text: str) -> int:
+        """Send a plain Telegram status/summary message. Returns message_id."""
+        self.require_configured()
+        async with httpx.AsyncClient(timeout=30) as client:
+            response = await client.post(
+                f"{self.base_url}/sendMessage",
+                json={
+                    "chat_id": self.chat_id,
+                    "text": text,
+                    "disable_web_page_preview": True,
+                },
+            )
+            response.raise_for_status()
+            data = response.json()
+            if not data.get("ok"):
+                raise RuntimeError(f"Telegram sendMessage failed: {data}")
+            return int(data["result"]["message_id"])
+
     async def send_job_for_approval(
         self,
         job: dict,
