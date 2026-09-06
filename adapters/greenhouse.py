@@ -6,11 +6,18 @@ Greenhouse forms are semi-standardized:
 - Custom questions: varies per company
 """
 
+import asyncio
 import random
+from urllib.parse import urlsplit, parse_qs
+from utils.live_safety import is_greenhouse_live_url
 import re
 from playwright.async_api import Page
 from utils.brain import ClaudeBrain
 from utils.answers import find_cached_answer, get_personal_field
+
+
+class GreenhouseSubmissionError(RuntimeError):
+    """Human-readable submission failure without sensitive field values."""
 
 
 async def apply_greenhouse(
@@ -32,12 +39,22 @@ async def apply_greenhouse(
         cover_letter: Pre-generated cover letter text
         dry_run: If True, fill the form but don't click submit
     """
+    if not dry_run and not is_greenhouse_live_url(job_url):
+        raise GreenhouseSubmissionError("Live submission blocked: unsupported ATS hostname")
     personal = profile["personal"]
     common = profile.get("common_answers", {})
 
     print(f"  📝 Navigating to application...")
     await page.goto(job_url, wait_until="networkidle")
     await page.wait_for_timeout(2000)
+
+    if not is_greenhouse_live_url(page.url) or parse_qs(urlsplit(page.url).query).get("error"):
+        raise GreenhouseSubmissionError("Greenhouse posting unavailable: redirected away from the application; no submit clicked")
+    if urlsplit(page.url).path.rstrip("/") != urlsplit(job_url).path.rstrip("/"):
+        raise GreenhouseSubmissionError("Greenhouse redirected to a different posting; no submit clicked")
+    # A dry run must also prove an application exists, not just visit a job board.
+    if not await page.locator("#first_name").count() or not await page.locator("#email").count():
+        raise GreenhouseSubmissionError("Greenhouse application fields missing; no submit clicked")
 
     # Scroll to application form
     app_form = await page.query_selector("#application, #app, form")
@@ -86,7 +103,7 @@ async def apply_greenhouse(
                 if file_input:
                     await file_input.set_input_files(profile["resume_path"])
     except Exception as e:
-        print(f"  ⚠ Resume upload failed: {e}")
+        raise GreenhouseSubmissionError("Resume upload failed; no submit clicked") from None
 
     # --- Cover Letter ---
     if cover_letter:
@@ -104,7 +121,6 @@ async def apply_greenhouse(
 
     # --- LinkedIn & Website ---
     for field_id, value in [
-        ('#job_application_answers_attributes_0_text_value', personal.get('linkedin', '')),
         ('input[name*="linkedin"]', personal.get('linkedin', '')),
         ('input[name*="website"]', personal.get('portfolio', '')),
         ('input[name*="github"]', personal.get('github', '')),
@@ -149,6 +165,12 @@ async def apply_greenhouse(
                     print(f"    ✅ {label_text[:40]}... → (cached)")
                     continue
 
+            sensitive = re.search(r"(authoriz|sponsor|visa|relocat|salary|compensation|pay|start date|earliest start|gender|race|ethnic|veteran|disabil|citizen|nationality|age|over 18|criminal|conviction|felony|background check|security clearance)", label_text.lower())
+            if sensitive:
+                print(f"    SENSITIVE FIELD BLOCKED: {label_text[:60]}")
+                continue
+
+
             # Check if it's a personal info field
             personal_val = get_personal_field(label_text, personal)
             if personal_val:
@@ -159,11 +181,6 @@ async def apply_greenhouse(
                     continue
 
             # Fall back to Claude
-            sensitive = re.search(r"(authoriz|sponsor|visa|relocat|salary|compensation|pay|start date|earliest start|gender|race|ethnic|veteran|disabil|citizen|nationality|age|over 18|criminal|conviction|felony|background check|security clearance)", label_text.lower())
-            if sensitive:
-                print(f"    SENSITIVE FIELD BLOCKED: {label_text[:60]}")
-                continue
-
             input_el = await field_el.query_selector('input, textarea, select')
             if input_el:
                 tag = await input_el.evaluate('el => el.tagName.toLowerCase()')
@@ -193,31 +210,53 @@ async def apply_greenhouse(
         print(f"  🏁 DRY RUN — Form filled but NOT submitted")
         print(f"     Review the form in the browser window")
         return True
-    else:
-        print(f"  🚀 Submitting application...")
-        submit_btn = await page.query_selector(
-            'input[type="submit"], '
-            'button[type="submit"], '
-            'button:has-text("Submit"), '
-            '#submit_app'
-        )
-        if submit_btn:
-            await submit_btn.click()
-            await page.wait_for_timeout(3000)
+    return await submit_greenhouse_form(page)
 
-            # Check for success
-            success = await page.query_selector(
-                '.flash-success, .confirmation, [class*="success"], [class*="thank"]'
-            )
-            if success:
-                print(f"  ✅ Application submitted successfully!")
-                return True
-            else:
-                print(f"  ⚠ Submit clicked but no confirmation detected")
-                return False
-        else:
-            print(f"  ⚠ Submit button not found!")
-            return False
+
+async def submit_greenhouse_form(page, timeout_seconds=30):
+    """Click once; require explicit confirmation, never infer success from disappearance."""
+    if not is_greenhouse_live_url(page.url):
+        raise GreenhouseSubmissionError("Live submission blocked: redirected to unsupported hostname")
+    buttons = page.locator(
+        'input[type="submit"], button[type="submit"], #submit_app'
+    ).or_(page.get_by_role("button", name=re.compile(r"^submit(?: application)?$", re.I)))
+    visible = [button for button in await buttons.all() if await button.is_visible()]
+    if len(visible) != 1:
+        raise GreenhouseSubmissionError("No unique visible application submit button; no submit clicked")
+    if not await visible[0].is_enabled():
+        raise GreenhouseSubmissionError("Submit button disabled; check required fields or CAPTCHA; no submit clicked")
+    invalid = page.locator('input:invalid, select:invalid, textarea:invalid, [aria-invalid="true"]')
+    if any([await el.is_visible() for el in await invalid.all()]):
+        raise GreenhouseSubmissionError("Required application fields are missing or invalid; no submit clicked")
+    confirmation = re.compile(
+        r"(?:your application has been (?:successfully )?(?:submitted|received)|"
+        r"thank you for (?:applying|your application)|application submitted successfully)", re.I
+    )
+    if await page.get_by_text(confirmation).count():
+        raise GreenhouseSubmissionError("Confirmation was already present before click; manual review required")
+    print("Greenhouse: clicking application submit once", flush=True)
+    try:
+        await visible[0].click(timeout=15000)
+    except Exception:
+        raise GreenhouseSubmissionError("Submission outcome unknown after click attempt; verify receipt before retry") from None
+    deadline = asyncio.get_running_loop().time() + timeout_seconds
+    while asyncio.get_running_loop().time() < deadline:
+        try:
+            if is_greenhouse_live_url(page.url):
+                for el in await page.get_by_text(confirmation).all():
+                    if await el.is_visible():
+                        print("Greenhouse: explicit application confirmation detected", flush=True)
+                        return True
+            errors = page.locator('[aria-invalid="true"], input:invalid, select:invalid, textarea:invalid, .field-error, .error-message, [role="alert"]')
+            if any([await el.is_visible() for el in await errors.all()]):
+                raise ValueError("Greenhouse displayed validation/errors after submit; check required fields or CAPTCHA")
+        except ValueError as exc:
+            raise GreenhouseSubmissionError(str(exc)) from None
+        except Exception:
+            # Navigation may temporarily destroy the execution context.
+            pass
+        await page.wait_for_timeout(250)
+    raise GreenhouseSubmissionError("Submission outcome unknown: clicked submit but no explicit confirmation; verify receipt before retry")
 
 
 async def _select_best_option(select_el, target_value: str):

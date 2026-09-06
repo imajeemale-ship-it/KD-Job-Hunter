@@ -1687,6 +1687,16 @@ async def apply_smart(
     Returns:
         True on success/dry-run, False on failure
     """
+    # Never resolve or fall back to AI adapters during live submission.
+    if not dry_run:
+        from utils.live_safety import is_greenhouse_live_url
+        from adapters.greenhouse import apply_greenhouse
+        if not is_greenhouse_live_url(job_url):
+            raise RuntimeError("Live submission blocked: unsupported ATS hostname")
+        return await apply_greenhouse(
+            page, job_url, profile, brain, cover_letter=cover_letter, dry_run=False
+        )
+
     # ─── Phase 0: URL Resolution ────────────────────────────────────────
     from utils.url_resolver import resolve_apply_url, is_ats_url, is_aggregator_url
 

@@ -19,8 +19,11 @@ from playwright.async_api import async_playwright
 
 from adapters.stagehand_adapter import apply_smart
 from utils.brain import ClaudeBrain
+from utils.live_safety import is_greenhouse_live_url
+from adapters.greenhouse import GreenhouseSubmissionError
 from utils.kd_approval_state import (
     create_waiting,
+    claim_submission,
     get_approved,
     get_by_job,
     get_by_nonce,
@@ -71,13 +74,12 @@ async def queue_high_matches(profile: dict) -> int:
         raise RuntimeError("Master resume could not be read; refusing to generate applications.")
 
     brain = ClaudeBrain(verbose=False, profile=profile)
-    from utils.url_resolver import is_ats_url
 
     candidates = [
         j for j in get_jobs_by_status("matched")
         if int(j.get("match_score") or 0) >= min_score
         and not get_by_job(j["id"])
-        and is_ats_url(j.get("apply_url") or j.get("url") or "")
+        and is_greenhouse_live_url(j.get("apply_url") or j.get("url") or "")
     ]
     candidates.sort(key=lambda j: int(j.get("match_score") or 0), reverse=True)
 
@@ -113,21 +115,51 @@ async def queue_high_matches(profile: dict) -> int:
 
 
 async def submit_job(profile: dict, job_id: str) -> bool:
+    if not claim_submission(job_id, int(profile.get("rate_limits", {}).get("max_applications_per_day", 5))):
+        return False
+    job = get_job_by_id(job_id) or {}
+    label = f"{job.get('title', 'Job')} @ {job.get('company', 'Unknown company')}"
+    telegram = TelegramApproval(profile)
+
+    async def notify(text):
+        try:
+            await telegram.send_status(text)
+        except Exception:
+            # Transport exceptions can include bot credentials. Never print them.
+            print(f"Telegram status delivery failed for {job_id}", flush=True)
+
+    await notify(f"APPROVED — SUBMITTING\n\n{label}\n\nWorking on the application now...")
+    try:
+        success = await _submit_claimed_job(profile, job_id)
+    except Exception as exc:
+        # Adapter errors are controlled messages; other exceptions may contain secrets.
+        reason = str(exc) if isinstance(exc, GreenhouseSubmissionError) else "Submission stopped unexpectedly; outcome unknown, review worker state before retry"
+        mark_failed(job_id, reason)
+        success = (get_by_job(job_id) or {}).get("status") == "submitted"
+    if success:
+        await notify(f"SUBMITTED ✅\n\n{label}\n\nApplication submitted successfully.")
+    else:
+        reason = (get_by_job(job_id) or {}).get("error") or "Submission could not be completed"
+        await notify(f"SUBMISSION FAILED ❌\n\n{label}\n\nReason: {reason}")
+    return success
+
+
+async def _submit_claimed_job(profile: dict, job_id: str) -> bool:
     job = get_job_by_id(job_id)
     if not job:
         raise RuntimeError(f"Job not found: {job_id}")
 
     rate_limits = profile.get("rate_limits", {})
-    max_per_day = int(rate_limits.get("max_applications_per_day", 5))
+    max_per_day = min(5, int(rate_limits.get("max_applications_per_day", 5)))
     if get_today_count() >= max_per_day:
-        raise RuntimeError(f"Daily application limit reached ({max_per_day}).")
+        raise GreenhouseSubmissionError(f"Daily application limit reached ({max_per_day}); no submit clicked")
 
     approval_cfg = profile.get("approval", {})
     headless = bool(approval_cfg.get("headless_submission", True))
     tailored = get_tailored_resume(job_id) or {}
     tailored_pdf = tailored.get("generated_pdf_path", "")
     if not tailored_pdf or not Path(tailored_pdf).exists():
-        raise RuntimeError("Tailored resume PDF is missing; refusing live submission.")
+        raise GreenhouseSubmissionError("Tailored resume PDF is missing; no submit clicked")
 
     cover_letter = tailored.get("tailored_cover_letter") or job.get("cover_letter") or ""
 
@@ -135,6 +167,13 @@ async def submit_job(profile: dict, job_id: str) -> bool:
     # job-specific generated PDF. The private master resume is never modified.
     submit_profile = copy.deepcopy(profile)
     submit_profile["resume_path"] = tailored_pdf
+
+    apply_url = job.get("apply_url") or job.get("url") or ""
+    if not is_greenhouse_live_url(apply_url):
+        reason = "Live autonomous submission blocked: unsupported ATS hostname"
+        mark_failed(job_id, reason)
+        print(reason)
+        return False
 
     brain = ClaudeBrain(verbose=True, profile=submit_profile)
     async with async_playwright() as p:
@@ -157,12 +196,12 @@ async def submit_job(profile: dict, job_id: str) -> bool:
         finally:
             await browser.close()
 
-    log_applied(job_id, bool(success))
     if success:
         mark_submitted(job_id)
+        log_applied(job_id, True)
         print(f"Submitted: {job['title']} @ {job['company']}")
     else:
-        mark_failed(job_id, "Application adapter returned false")
+        mark_failed(job_id, "Submission outcome unknown: adapter returned no confirmation; review before retry")
     return bool(success)
 
 
@@ -183,7 +222,8 @@ async def process_telegram_decisions(profile: dict) -> int:
 
         job_id = approval["job_id"]
         approved = bool(decision["approved"])
-        set_decision(job_id, approved)
+        if not set_decision(job_id, approved):
+            continue
 
         if not approved:
             job = get_job_by_id(job_id) or {}
@@ -196,11 +236,8 @@ async def process_telegram_decisions(profile: dict) -> int:
         await telegram.acknowledge(
             decision.get("callback_query_id", ""), "Approved. Submitting now."
         )
-        try:
-            await submit_job(profile, job_id)
-        except Exception as exc:
-            mark_failed(job_id, str(exc))
-            print(f"Submission failed for {job_id}: {exc}")
+
+        await submit_job(profile, job_id)
         processed += 1
 
     return processed
@@ -210,28 +247,25 @@ async def submit_pending_approved(profile: dict) -> int:
     """Retry jobs already approved but not yet successfully submitted."""
     count = 0
     for approval in get_approved():
-        try:
-            await submit_job(profile, approval["job_id"])
-        except Exception as exc:
-            mark_failed(approval["job_id"], str(exc))
-            print(f"Submission retry failed for {approval['job_id']}: {exc}")
+        await submit_job(profile, approval["job_id"])
         count += 1
     return count
 
 
 async def run_once(profile: dict) -> None:
-    await queue_high_matches(profile)
     await process_telegram_decisions(profile)
     await submit_pending_approved(profile)
+    await queue_high_matches(profile)
 
 
 async def run_forever(profile: dict) -> None:
+    print("KD approval worker started: Greenhouse-only live submissions, daily cap 5", flush=True)
     interval = int(profile.get("approval", {}).get("poll_interval_seconds", 30))
     while True:
         try:
             await run_once(profile)
         except Exception as exc:
-            print(f"KD approval worker error: {exc}")
+            print(f"KD approval worker error ({type(exc).__name__}); inspect local configuration", flush=True)
         await asyncio.sleep(max(interval, 10))
 
 

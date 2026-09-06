@@ -72,18 +72,19 @@ def get_by_nonce(nonce: str):
         conn.close()
 
 
-def set_decision(job_id: str, approved: bool) -> None:
+def set_decision(job_id: str, approved: bool) -> bool:
     conn = _db()
     try:
-        conn.execute(
+        cursor = conn.execute(
             """
             UPDATE kd_approvals
             SET status = ?, decided_at = ?
-            WHERE job_id = ?
+            WHERE job_id = ? AND status = 'waiting' AND submitted_at IS NULL
             """,
             ("approved" if approved else "declined", datetime.now().isoformat(), job_id),
         )
         conn.commit()
+        return cursor.rowcount == 1
     finally:
         conn.close()
 
@@ -95,7 +96,7 @@ def mark_submitted(job_id: str) -> None:
             """
             UPDATE kd_approvals
             SET status = 'submitted', submitted_at = ?, error = ''
-            WHERE job_id = ?
+            WHERE job_id = ? AND status = 'submitting' AND submitted_at IS NULL
             """,
             (datetime.now().isoformat(), job_id),
         )
@@ -108,7 +109,7 @@ def mark_failed(job_id: str, error: str) -> None:
     conn = _db()
     try:
         conn.execute(
-            "UPDATE kd_approvals SET status = 'failed', error = ? WHERE job_id = ?",
+            "UPDATE kd_approvals SET status = 'failed', error = ? WHERE job_id = ? AND status = 'submitting' AND submitted_at IS NULL",
             (str(error)[:2000], job_id),
         )
         conn.commit()
@@ -123,5 +124,48 @@ def get_approved() -> list[dict]:
             "SELECT * FROM kd_approvals WHERE status = 'approved' ORDER BY decided_at"
         ).fetchall()
         return [dict(row) for row in rows]
+    finally:
+        conn.close()
+
+
+def claim_submission(job_id: str, max_per_day: int = 5) -> bool:
+    """Serialize live work across workers; interrupted claims require manual review."""
+    conn = _db()
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        if conn.execute("SELECT 1 FROM kd_approvals WHERE status = 'submitting'").fetchone():
+            return False
+        count = conn.execute("""
+            SELECT COUNT(*) FROM applications WHERE id IN (
+                SELECT job_id FROM kd_approvals WHERE DATE(submitted_at) = DATE('now')
+                UNION SELECT id FROM applications WHERE status = 'applied' AND DATE(applied_at) = DATE('now')
+            )
+        """).fetchone()[0]
+        if count >= min(5, max_per_day):
+            return False
+        cursor = conn.execute("""
+            UPDATE kd_approvals SET status = 'submitting', error = ''
+            WHERE job_id = ? AND status = 'approved' AND submitted_at IS NULL
+            AND EXISTS (SELECT 1 FROM applications WHERE id = ?
+                        AND status IN ('matched', 'failed', 'discovered'))
+        """, (job_id, job_id))
+        conn.commit()
+        return cursor.rowcount == 1
+    finally:
+        conn.close()
+
+
+def retry_failed(job_id: str) -> bool:
+    """Explicit operator action only; ambiguous outcomes require receipt review first."""
+    conn = _db()
+    try:
+        cursor = conn.execute("""
+            UPDATE kd_approvals SET status = 'approved', error = ''
+            WHERE job_id = ? AND status = 'failed' AND decided_at IS NOT NULL
+            AND submitted_at IS NULL AND error NOT LIKE '%unknown%'
+            AND error NOT LIKE '%Application adapter returned false%'
+        """, (job_id,))
+        conn.commit()
+        return cursor.rowcount == 1
     finally:
         conn.close()
