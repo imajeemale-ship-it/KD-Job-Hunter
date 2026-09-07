@@ -233,7 +233,14 @@ Return a JSON assessment:
         return self.ask_json(prompt, timeout=180, component="profile_analysis")
 
     def answer_question(self, question: str, profile: dict, context: str = "") -> str:
-        """Answer a custom application question using AI."""
+        """Answer a custom application question using AI, except sensitive fields."""
+        from utils.answers import find_cached_answer
+        sensitive = re.search(r"(authoriz|sponsor|visa|relocat|salary|compensation|pay|start date|earliest start|gender|race|ethnic|veteran|disabil|citizen|nationality|age|over 18|criminal|conviction|felony|background check|security clearance)", question.lower())
+        if sensitive:
+            explicit = find_cached_answer(question, profile.get("common_answers", {}))
+            if explicit:
+                return str(explicit)
+            raise RuntimeError(f"Sensitive application question has no explicit saved answer: {question}")
         return self.ask(f"""You are filling out a job application for someone.
 Answer this question concisely and professionally (1-3 sentences max).
 

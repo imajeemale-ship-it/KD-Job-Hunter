@@ -1687,6 +1687,16 @@ async def apply_smart(
     Returns:
         True on success/dry-run, False on failure
     """
+    # Never resolve or fall back to AI adapters during live submission.
+    if not dry_run:
+        from utils.live_safety import is_greenhouse_live_url
+        from adapters.greenhouse import apply_greenhouse
+        if not is_greenhouse_live_url(job_url):
+            raise RuntimeError("Live submission blocked: unsupported ATS hostname")
+        return await apply_greenhouse(
+            page, job_url, profile, brain, cover_letter=cover_letter, dry_run=False
+        )
+
     # ─── Phase 0: URL Resolution ────────────────────────────────────────
     from utils.url_resolver import resolve_apply_url, is_ats_url, is_aggregator_url
 
@@ -1757,6 +1767,10 @@ async def apply_smart(
             print("  [!] CLI adapter failed, trying generic adapter...")
         except Exception as e:
             print(f"  [!] CLI adapter error: {e}, trying generic adapter...")
+
+    if not dry_run:
+        print("  [!] Generic live fallback disabled for safety")
+        return False
 
     # Generic: CSS-selector based AI form filler (last resort)
     print("  [*] Adapter: Generic (CSS + AI fallback)")
