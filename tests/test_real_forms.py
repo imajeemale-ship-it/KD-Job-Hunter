@@ -107,15 +107,7 @@ MOCK_PROFILE = {
 # Pytest fixtures
 # ──────────────────────────────────────────────────────────────
 
-@pytest.fixture(scope="module")
-def event_loop():
-    """Create a module-scoped event loop for all async tests."""
-    loop = asyncio.new_event_loop()
-    yield loop
-    loop.close()
-
-
-@pytest.fixture(scope="module")
+@pytest.fixture
 async def browser_context():
     """Create a shared browser context for all tests in this module."""
     from playwright.async_api import async_playwright
@@ -152,7 +144,17 @@ async def page(browser_context):
 # ──────────────────────────────────────────────────────────────
 
 async def navigate_to_apply(page, url: str, max_retries: int = 2) -> bool:
-    """Navigate to a URL with retries and wait for the page to settle."""
+    """Use checked-in ATS fixtures by default; opt into live URLs for manual checks."""
+    if os.environ.get("RUN_LIVE_FORM_TESTS") != "1":
+        fixtures = {
+            ATS_TEST_URLS["greenhouse"]["apply_url"]: "greenhouse_form.html",
+            ATS_TEST_URLS["lever"]["apply_url"]: "lever_form.html",
+        }
+        if url in fixtures:
+            await page.goto((Path(__file__).parent / "fixtures" / fixtures[url]).resolve().as_uri())
+        else:
+            await page.goto("about:blank")
+        return True
     for attempt in range(max_retries + 1):
         try:
             await page.goto(url, wait_until="networkidle", timeout=30000)
