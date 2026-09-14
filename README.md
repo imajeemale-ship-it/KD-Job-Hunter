@@ -527,3 +527,9 @@ MIT
 - [Alpine.js](https://alpinejs.dev/) and [Tailwind CSS](https://tailwindcss.com/) for the dashboard UI
 - [APScheduler](https://apscheduler.readthedocs.io/) for background job scheduling
 - The open source community
+
+## Autonomous execution
+
+Set `autonomous.enabled: true` in `profile.yaml` to run one persistent queue item per scheduler tick. The default `live_submit: false` fills forms as a dry run and leaves them in `WAITING`; set it to `true` only after reviewing your profile, answers, and local browser setup. `min_score`, `daily_cap`, `max_attempts`, `interval_seconds`, `follow_up_days`, and `approval_required` control eligibility and execution. Set `paused: true` to stop new work immediately. The server and scheduler must remain running for continuous execution.
+
+The worker verifies a post-submit confirmation before marking a job applied. An ambiguous submit goes to `NEEDS_KD` so it cannot be submitted twice. Retryable pre-confirmation failures back off exponentially; an interrupted in-progress attempt needs a portal/email check before retry. After verification, a follow-up is queued for the configured date. Follow-up delivery remains a manual action and is never counted as sent automatically. Inspect `/api/autonomous/queue` and `/api/autonomous/metrics` for queue state and outcome metrics. To recover, resolve `NEEDS_KD` in the database only after checking the employer portal, then explicitly requeue the job; keep the service paused during manual repair.

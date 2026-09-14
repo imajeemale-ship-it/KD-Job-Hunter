@@ -120,3 +120,15 @@ ai:
     form_analysis: claude_cli
     email_classification: claude_cli
     profile_analysis: claude_cli
+
+# Persistent execution loop. Enable only after reviewing profile and form answers.
+autonomous:
+  enabled: false
+  paused: false
+  live_submit: false
+  min_score: 75
+  daily_cap: 10
+  max_attempts: 3
+  interval_seconds: 60
+  follow_up_days: 7
+  approval_required: []

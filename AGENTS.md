@@ -178,3 +178,7 @@ fastapi, uvicorn, jinja2, apscheduler
 ```
 
 Install: `pip install -r requirements.txt && playwright install chromium`
+
+## Autonomous mode
+
+The scheduler runs `utils/autonomous.py` when `autonomous.enabled` is true. Set `autonomous.paused` as the kill switch. `live_submit` defaults to false for dry runs; set it true for unattended submission after profile review. The worker uses a durable SQLite execution queue, verifies success before recording `applied`, and puts ambiguous outcomes in `NEEDS_KD` for portal/email review. Check `/api/autonomous/queue` and `/api/autonomous/metrics`; see README for configuration and recovery.
