@@ -530,6 +530,47 @@ MIT
 
 ## Autonomous execution
 
-Set `autonomous.enabled: true` in `profile.yaml` to run one persistent queue item per scheduler tick. The default `live_submit: false` fills forms as a dry run and leaves them in `WAITING`; set it to `true` only after reviewing your profile, answers, and local browser setup. `min_score`, `daily_cap`, `max_attempts`, `interval_seconds`, `follow_up_days`, and `approval_required` control eligibility and execution. Set `paused: true` to stop new work immediately. The server and scheduler must remain running for continuous execution.
+The existing scheduler runs one durable SQLite queue item each `autonomous.interval_seconds` while the server/VPS service is running. Enable it with `autonomous.enabled: true`. Each tick reloads `profile.yaml`; `paused: true` stops new execution, and the profile is checked again immediately before submission. `live_submit: false` fills local/browser forms without submitting and prepares follow-ups without sending. Completed dry runs remain `WAITING` and resume when live mode is enabled.
 
-The worker verifies a post-submit confirmation before marking a job applied. An ambiguous submit goes to `NEEDS_KD` so it cannot be submitted twice. Retryable pre-confirmation failures back off exponentially; an interrupted in-progress attempt needs a portal/email check before retry. After verification, a follow-up is queued for the configured date. Follow-up delivery remains a manual action and is never counted as sent automatically. Inspect `/api/autonomous/queue` and `/api/autonomous/metrics` for queue state and outcome metrics. To recover, resolve `NEEDS_KD` in the database only after checking the employer portal, then explicitly requeue the job; keep the service paused during manual repair.
+### Application safety and answers
+
+Qualified jobs pass through preparation, form filling, one submit attempt, confirmation verification, logging, and follow-up scheduling. Preparation checks the configured resume exists and creates per-job content from exact profile skills. It preserves the applicant's resume file; it does not generate a new PDF or invent experience. Prepared content is stored in the existing `tailored_resume` field.
+
+Autonomous form answers come only from narrowly matched profile/common answers or exact `verified_answers` entries. The adapter reads actual form controls, not posting text, for blockers. Unknown questions include their exact label and required action in `NEEDS_KD`. Add an applicant-verified answer to `verified_answers` before requeuing that blocked item. No model supplies factual custom answers. Exact legal/attestation answers can be stored; `approval_required` still overrides them. Visible CAPTCHA, MFA and assessments require the corresponding human action.
+
+A durable submission fence is written before the final click. Only a new positive post-click confirmation records `applied`. Logging success, completing the queue item and scheduling follow-up are one transaction. A timeout, crash or unclear outcome after that fence cannot trigger automatic resubmission or a fallback adapter. Canonical ATS URLs protect duplicates discovered under different IDs. A local OS lock serializes workers across processes and is released automatically on process death; use one VPS with a local SQLite filesystem.
+
+### Retries, caps and metrics
+
+Pre-submit technical failures retry after 60, 120, 240 seconds, up to one hour between attempts and `max_attempts` total attempts. Exhaustion ends in `FAILED`, an operational failure, rather than asking the applicant for help. Restart recovery automatically retries work interrupted before the submit fence. Work interrupted after it goes to `NEEDS_KD` for portal/email verification. `daily_cap` counts verified submissions independently of later interview/offer/rejection status and is checked again at submission; it does not block due follow-ups.
+
+`GET /api/autonomous/queue` exposes states, reasons, attempts and submission phase. `GET /api/autonomous/metrics` uses the configured qualifying threshold. Discovery/qualification count jobs; attempted counts actual adapter invocations (including dry runs/retries); verified-submitted counts unique confirmed jobs; failed counts terminal failed application items; needs-KD counts current blocked items; followups-sent counts accepted deliveries; interviews-detected counts unique jobs with recorded interview status, even after later status changes. Discovery/scoring never increments application outcomes.
+
+### Automatic follow-ups
+
+Every verified application queues `follow_up`. Configure `autonomous.follow_up.enabled`, SMTP settings, and verified contacts as shown in `profile.yaml.example`. The contact is either explicitly configured as `contacts[job_id]` or stored in job metadata as `follow_up_contact: {email: ..., verified: true}`. SMTP messages contain only the recorded role, company and application date. No contact address or employer response is inferred.
+
+The first follow-up is due after `follow_up_days`; subsequent no-response stages use distinct queue identities (`follow_up:2`, etc.) every `follow_up.interval_days`, up to `max_messages`. A recorded status change stops this sequence. Disabled delivery waits without escalating. Missing contact/applicant facts explain the exact required input in `NEEDS_KD`. Connect/auth failures and explicit SMTP rejection retry; uncertain delivery after SMTP DATA is fenced for sent-mail verification. `FOLLOWUP_SENT` means SMTP accepted delivery, not that the employer read or answered it.
+
+### VPS setup and recovery
+
+Docker Compose persists the entire `./data` directory at `/app/data` with `MRJOBS_DB_PATH=/app/data/applications.db`, including SQLite WAL files. Existing deployments must migrate before starting the new container:
+
+1. Stop the old service and ensure its database is checkpointed/closed.
+2. Create `data/` and copy the existing database with SQLite's backup API, for example:
+   ```bash
+   mkdir -p data
+   python3 -c 'import sqlite3; src=sqlite3.connect("applications.db"); dst=sqlite3.connect("data/applications.db"); src.backup(dst); dst.close(); src.close()'
+   ```
+3. Start the service with `docker compose up -d --build`. Keep `paused: true` while reviewing the migrated queue. Compose uses `restart: unless-stopped`.
+
+Non-Docker servers continue using the existing repository database unless `MRJOBS_DB_PATH` is set. Schema migrations are additive; legacy interrupted/ambiguous submissions retain their protection. Never delete a submission fence merely to retry. For an uncertain submit, verify the employer portal/email first. If verification proves submission occurred, reconcile success and follow-up atomically; only remove a fence/requeue after evidence proves nothing was submitted. Keep the worker paused during manual repair. No real submissions are needed for tests.
+
+### Offline regression checks
+
+```bash
+.venv/bin/python -m pytest -q tests/test_autonomous.py tests/test_autonomous_regressions.py tests/test_autonomous_forms.py
+.venv/bin/python -m pytest -q
+```
+
+Browser tests use local fixtures and synthetic profiles. The autonomy lifecycle test covers discovery → scoring → grounded preparation → form filling → verified local submission → logging → follow-up using fake scoring and SMTP transports. Separate process-crash tests verify restart safety. Optional authenticated Claude field-analysis tests require `RUN_CLAUDE_FORM_TESTS=1`; optional employer-site checks require `RUN_LIVE_FORM_TESTS=1`. Leave both unset for deterministic offline validation.

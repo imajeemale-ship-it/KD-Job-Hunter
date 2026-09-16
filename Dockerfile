@@ -39,7 +39,7 @@ RUN python -m playwright install chromium \
     && python -m playwright install-deps chromium
 
 # Create directories
-RUN mkdir -p .cache resumes logs
+RUN mkdir -p .cache resumes logs data
 
 # Copy application
 COPY . .

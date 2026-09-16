@@ -233,20 +233,14 @@ Return a JSON assessment:
         return self.ask_json(prompt, timeout=180, component="profile_analysis")
 
     def answer_question(self, question: str, profile: dict, context: str = "") -> str:
-        """Answer a custom application question using AI."""
-        return self.ask(f"""You are filling out a job application for someone.
-Answer this question concisely and professionally (1-3 sentences max).
-
-Applicant info:
-- Name: {profile['personal']['first_name']} {profile['personal']['last_name']}
-- Location: {profile['personal']['location']}
-- Looking for: {', '.join(profile['preferences']['roles'])}
-
-Additional context: {context}
-
-Question: {question}
-
-Answer (be concise, direct, professional):""", component="form_analysis")
+        """Resolve a factual answer only from applicant-controlled data."""
+        from utils.answers import trusted_answer
+        from utils.autonomous import Blocked, blocker
+        reason = blocker(question, profile)
+        answer = trusted_answer(question, profile)
+        if reason or answer is None:
+            raise Blocked(reason or f"Question: {question}. Required action: provide a verified applicant answer.")
+        return answer
 
     def analyze_form(self, form_html: str, profile: dict) -> list:
         """Analyze a form's HTML and return fill instructions."""

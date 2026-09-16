@@ -420,7 +420,7 @@ Examples:
         asyncio.run(cmd_rescore(profile))
     elif args.command == "autonomous":
         from utils.autonomous import cycle
-        print(asyncio.run(cycle(profile)))
+        print(asyncio.run(cycle(profile, load_profile=load_profile)))
     elif args.command == "server":
         from dashboard.server import run_server
         try:

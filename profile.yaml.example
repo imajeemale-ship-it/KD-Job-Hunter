@@ -132,3 +132,19 @@ autonomous:
   interval_seconds: 60
   follow_up_days: 7
   approval_required: []
+  # Follow-up email is sent only when enabled AND live_submit is true.
+  # Contacts must be explicitly provided; never infer an address.
+  follow_up:
+    enabled: false
+    max_messages: 2
+    interval_days: 14
+    contacts: {}  # job_id: verified-employer@example.com
+    smtp:
+      host: ""
+      port: 587
+      ssl: false  # false uses STARTTLS
+      username: ""
+      password: ""
+
+# Exact, applicant-verified custom questions and answers. False/0 are valid.
+verified_answers: {}

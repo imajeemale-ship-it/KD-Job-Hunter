@@ -107,41 +107,11 @@ Rules:
             print(f"  ⚠ No application form found on this page")
             return False
 
-        # Execute field fills
-        fields = instructions.get("fields", [])
-        for field_inst in fields:
-            action = field_inst.get("action", "")
-            selector = field_inst.get("selector", "")
-            value = field_inst.get("value", "")
-            note = field_inst.get("note", "")
-
-            try:
-                el = await page.wait_for_selector(selector, timeout=3000)
-                if not el:
-                    continue
-
-                if action == "fill":
-                    await el.fill(value)
-                    print(f"    ✅ {note}: filled")
-                elif action == "select":
-                    try:
-                        await el.select_option(value=value)
-                    except Exception:
-                        await el.select_option(label=value)
-                    print(f"    ✅ {note}: selected '{value}'")
-                elif action == "check":
-                    is_checked = await el.is_checked()
-                    if not is_checked:
-                        await el.check()
-                    print(f"    ✅ {note}: checked")
-                elif action == "upload":
-                    await el.set_input_files(profile["resume_path"])
-                    print(f"    ✅ {note}: uploaded")
-
-                await page.wait_for_timeout(random.randint(300, 700))
-
-            except Exception as e:
-                print(f"    ⚠ {note or selector}: {e}")
+        # The model may interpret navigation, but all applicant values come
+        # from the actual labelled controls and trusted profile data.
+        from adapters.stagehand_adapter import get_form_snapshot, _fill_trusted_fields
+        _, fields = await get_form_snapshot(page)
+        await _fill_trusted_fields(page, fields, profile, cover_letter)
 
         # Click next/submit
         next_btn_selector = instructions.get("next_button")

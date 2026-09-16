@@ -9,7 +9,8 @@ Greenhouse forms are semi-standardized:
 import random
 from playwright.async_api import Page
 from utils.brain import ClaudeBrain
-from utils.answers import find_cached_answer, get_personal_field
+from utils.answers import trusted_answer
+from utils.autonomous import Blocked, blocker
 
 
 async def apply_greenhouse(
@@ -134,49 +135,21 @@ async def apply_greenhouse(
             if not label_text or len(label_text) < 3:
                 continue
 
-            # Try cached answer first
-            cached = find_cached_answer(label_text, common)
-            if cached:
-                input_el = await field_el.query_selector('input, textarea, select')
-                if input_el:
-                    tag = await input_el.evaluate('el => el.tagName.toLowerCase()')
-                    if tag == 'select':
-                        # Try to find matching option
-                        await _select_best_option(input_el, cached)
-                    else:
-                        await input_el.fill(cached)
-                    print(f"    ✅ {label_text[:40]}... → (cached)")
-                    continue
+            input_el = await field_el.query_selector('input:not([type="file"]), textarea, select')
+            if not input_el:
+                continue
+            reason = blocker(label_text, profile)
+            answer = trusted_answer(label_text, profile)
+            if reason or answer is None:
+                raise Blocked(reason or f"Question: {label_text}. Required action: provide an exact verified applicant answer.")
+            tag = await input_el.evaluate('el => el.tagName.toLowerCase()')
+            if tag == 'select':
+                await input_el.select_option(label=answer)
+            else:
+                await input_el.fill(answer)
 
-            # Check if it's a personal info field
-            personal_val = get_personal_field(label_text, personal)
-            if personal_val:
-                input_el = await field_el.query_selector('input, textarea')
-                if input_el:
-                    await input_el.fill(personal_val)
-                    print(f"    ✅ {label_text[:40]}... → (personal)")
-                    continue
-
-            # Fall back to Claude
-            input_el = await field_el.query_selector('input, textarea, select')
-            if input_el:
-                tag = await input_el.evaluate('el => el.tagName.toLowerCase()')
-                if tag == 'select':
-                    options_text = await input_el.evaluate(
-                        'el => Array.from(el.options).map(o => o.text + "=" + o.value).join(", ")'
-                    )
-                    answer = brain.ask(
-                        f"For a job application, which option best answers: '{label_text}'?\n"
-                        f"Options: {options_text}\n"
-                        f"Reply with ONLY the option value, nothing else."
-                    ).strip()
-                    await _select_best_option(input_el, answer)
-                else:
-                    answer = brain.answer_question(label_text, profile)
-                    await input_el.fill(answer.strip())
-
-                print(f"    🧠 {label_text[:40]}... → (AI)")
-
+        except Blocked:
+            raise
         except Exception as e:
             print(f"    ⚠ Custom field error: {e}")
 

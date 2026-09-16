@@ -6,8 +6,9 @@ services:
     volumes:
       - ./profile.yaml:/app/profile.yaml
       - ./resumes:/app/resumes
-      - ./applications.db:/app/applications.db
+      - ./data:/app/data
       - ./.cache:/app/.cache
     environment:
+      - MRJOBS_DB_PATH=/app/data/applications.db
       - CLAUDE_AUTH_TOKEN=${CLAUDE_AUTH_TOKEN}
     restart: unless-stopped

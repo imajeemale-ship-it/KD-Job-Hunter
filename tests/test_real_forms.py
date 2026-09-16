@@ -458,8 +458,8 @@ def claude_cli_available() -> bool:
 
 # Skip field analysis tests if Claude CLI is not available
 requires_claude = pytest.mark.skipif(
-    not claude_cli_available(),
-    reason="Claude CLI not available — field analysis tests require 'claude' in PATH"
+    os.environ.get("RUN_CLAUDE_FORM_TESTS") != "1" or not claude_cli_available(),
+    reason="Optional Claude integration: set RUN_CLAUDE_FORM_TESTS=1 with an authenticated CLI"
 )
 
 
