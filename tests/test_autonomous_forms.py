@@ -191,3 +191,119 @@ async def test_submit_type_next_continues_safely_without_approval(local_page, tm
     assert await local_page.evaluate('window.nextClicks') == 1
     assert await local_page.evaluate('window.submits') == 1
     assert await worker.cycle(profile, apply) == 'IDLE'
+
+
+def setup_fence_wizard(tmp_path, monkeypatch, next_label='Next', next_type='submit'):
+    from types import SimpleNamespace
+    from utils import tracker
+    monkeypatch.setattr(tracker, 'DB_PATH', tmp_path / 'wizard-fence.db')
+    html = '''<html><body><form id="step1"><label for="first">First Name</label><input id="first" required>
+      <button id="next" type="NEXT_TYPE">NEXT_LABEL</button></form><script>
+      document.querySelector('#next').onclick = e => {
+        e.preventDefault();
+        document.body.innerHTML = '<form id="step2"><label for="email">Email</label><input id="email" required><button id="final" type="submit">Submit Application</button></form>';
+        document.querySelector('form').onsubmit = e => {
+          e.preventDefault(); document.body.innerHTML='Thank you for applying!';
+        };
+      };</script></body></html>'''
+    url = 'data:text/html,' + quote(html.replace('NEXT_TYPE', next_type).replace('NEXT_LABEL', next_label))
+    profile = applicant()
+    profile['autonomous']['live_submit'] = True
+    tracker.log_discovered(SimpleNamespace(id='wizard', title='Engineer', company='Example', platform='fixture',
+        url=url, apply_url=url, location='Remote', description='Build software', metadata={}))
+    tracker.log_matched('wizard', 90, 'Fixture', '')
+    return profile, url
+
+
+def fence_state():
+    from utils import autonomous as worker
+    conn = worker.db()
+    try:
+        item = dict(conn.execute("SELECT * FROM execution_queue WHERE action='apply'").fetchone())
+        fences = conn.execute('SELECT COUNT(*) FROM submission_fences').fetchone()[0]
+        return item, fences
+    finally:
+        conn.close()
+
+
+@pytest.mark.parametrize('next_label', ['Next', 'Continue', 'Save & Continue'])
+@pytest.mark.parametrize('failure', ['timeout', 'crash'])
+@pytest.mark.parametrize('interrupt_at', ['next', 'final'])
+async def test_wizard_fence_boundary_and_interruption_recovery(
+    local_page, tmp_path, monkeypatch, next_label, failure, interrupt_at,
+):
+    import asyncio
+    from playwright.async_api import Locator
+    from utils import autonomous as worker
+
+    profile, url = setup_fence_wizard(tmp_path, monkeypatch, next_label)
+    real_click = Locator.click
+    clicks = {'next': 0, 'final': 0}
+    interrupted = False
+
+    async def click(control, *args, **kwargs):
+        nonlocal interrupted
+        control_id = await control.get_attribute('id')
+        # Inspect real persisted state immediately BEFORE the real browser click.
+        item, fences = fence_state()
+        assert fences == (1 if control_id == 'final' else 0)
+        assert item['phase'] == ('submitting' if control_id == 'final' else 'preparing')
+        await real_click(control, *args, **kwargs)
+        clicks[control_id] += 1
+        if control_id == interrupt_at and not interrupted:
+            interrupted = True
+            if failure == 'timeout':
+                raise TimeoutError('Simulated lost browser response after click')
+            # Escape the worker's exception handler, leaving durable IN_PROGRESS
+            # state just as a stopped process does. The next cycle recovers it.
+            raise asyncio.CancelledError('Simulated worker termination after click')
+
+    monkeypatch.setattr(Locator, 'click', click)
+
+    async def apply(job, dry_run, before_submit):
+        result = await apply_stagehand(local_page, url, profile, MagicMock(),
+            dry_run=dry_run, before_submit=before_submit)
+        return result, await local_page.locator('body').inner_text()
+
+    expected = 'FAILED_RETRY' if interrupt_at == 'next' else 'NEEDS_KD'
+    if failure == 'crash':
+        with pytest.raises(asyncio.CancelledError):
+            await worker.cycle(profile, apply)
+        assert fence_state()[0]['state'] == 'IN_PROGRESS'
+        assert await worker.cycle(profile, apply) == 'IDLE'
+    else:
+        assert await worker.cycle(profile, apply) == expected
+    item, fences = fence_state()
+    assert item['state'] == expected
+    assert fences == (1 if interrupt_at == 'final' else 0)
+    assert worker.metrics(profile=profile)['applications_verified_submitted'] == 0
+
+    conn = worker.db()
+    if interrupt_at == 'next':
+        conn.execute("UPDATE execution_queue SET due_at='2000-01-01' WHERE action='apply'")
+    else:
+        # Even an accidental requeue cannot bypass the real final-submit fence.
+        assert await worker.cycle(profile, apply) == 'IDLE'
+        conn.execute("UPDATE execution_queue SET state='READY',due_at='2000-01-01' WHERE action='apply'")
+    conn.commit()
+    conn.close()
+    assert await worker.cycle(profile, apply) == ('VERIFIED' if interrupt_at == 'next' else 'NEEDS_KD')
+    assert clicks == {'next': 2 if interrupt_at == 'next' else 1, 'final': 1}
+    assert worker.metrics(profile=profile)['needs_kd'] == (0 if interrupt_at == 'next' else 1)
+
+
+@pytest.mark.parametrize('next_type', ['button', 'submit'])
+async def test_wizard_dry_run_preserves_navigation_policy_without_fences(local_page, tmp_path, monkeypatch, next_type):
+    from utils import autonomous as worker
+    profile, url = setup_fence_wizard(tmp_path, monkeypatch, next_type=next_type)
+    profile['autonomous']['live_submit'] = False
+
+    async def apply(job, dry_run, before_submit):
+        result = await apply_stagehand(local_page, url, profile, MagicMock(),
+            dry_run=dry_run, before_submit=before_submit)
+        return result, await local_page.locator('body').inner_text()
+
+    assert await worker.cycle(profile, apply) == ('WAITING' if next_type == 'button' else 'FAILED_RETRY')
+    assert fence_state()[1] == 0
+    assert await local_page.locator('#final' if next_type == 'button' else '#next').count() == 1
+    assert worker.metrics(profile=profile)['applications_verified_submitted'] == 0

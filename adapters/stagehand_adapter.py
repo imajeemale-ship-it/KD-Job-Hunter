@@ -1883,8 +1883,8 @@ async def _apply_trusted(page, job_url, profile, brain, cover_letter, dry_run, m
             before = await frame.locator("body").inner_text()
             if dry_run and await next_button.get_attribute("type") != "button":
                 raise RuntimeError("Dry run cannot click submit-type wizard navigation.")
-            if not dry_run:
-                before_submit(page.url)
+            # Next/Continue advances the wizard, not the final application.
+            # Keep this phase retryable; only the final submit branch fences.
             await next_button.click(timeout=10000)
             await frame.wait_for_function("before => document.body.innerText !== before", arg=before, timeout=10000)
             after = await frame.locator("body").inner_text()
