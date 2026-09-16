@@ -303,6 +303,21 @@ async def stats() -> dict:
     return get_stats()
 
 
+@app.get("/api/autonomous/metrics")
+async def autonomous_metrics() -> dict:
+    from utils.autonomous import metrics
+    return metrics()
+
+
+@app.get("/api/autonomous/queue")
+async def autonomous_queue() -> list:
+    from utils.autonomous import db
+    conn = db()
+    rows = [dict(row) for row in conn.execute("SELECT * FROM execution_queue ORDER BY due_at,id")]
+    conn.close()
+    return rows
+
+
 @app.get("/api/stats/timeline")
 async def timeline() -> list:
     """Return per-day discovery and application counts (last 30 days)."""

@@ -122,6 +122,18 @@ async def scheduled_follow_up_check():
         print(f"[Scheduler] Follow-up check failed: {e}")
 
 
+async def scheduled_autonomous_cycle():
+    try:
+        profile = get_profile()
+        if profile and profile.get("autonomous", {}).get("enabled", False):
+            from utils.autonomous import cycle
+            outcome = await cycle(profile, load_profile=get_profile)
+            _last_results["autonomous"] = {"outcome": outcome, "timestamp": __import__("datetime").datetime.now().isoformat()}
+    except Exception as exc:
+        # APScheduler keeps ticking; expose configuration/storage failures.
+        _last_results["autonomous"] = {"error": str(exc), "timestamp": __import__("datetime").datetime.now().isoformat()}
+
+
 def setup_scheduler():
     """
     Configure scheduler jobs (but don't start yet).
@@ -177,6 +189,13 @@ def setup_scheduler():
         name="Follow-up Check",
         replace_existing=True
     )
+
+    # Register even while disabled; each tick reloads the profile so the kill
+    # switch and enable flag do not require a service restart.
+    scheduler.add_job(scheduled_autonomous_cycle,
+        trigger=IntervalTrigger(seconds=profile.get("autonomous", {}).get("interval_seconds", 60)),
+        id="autonomous", name="Autonomous execution", replace_existing=True,
+        max_instances=1, coalesce=True)
 
     _configured = True
     print(f"[Scheduler] Configured — Discovery every {discover_hours}h, Scoring every {score_minutes}m")

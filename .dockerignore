@@ -12,3 +12,7 @@ logs/
 .mypy_cache
 .pytest_cache
 node_modules
+
+# Persistent SQLite directory and worker lock
+data/
+*.worker.lock

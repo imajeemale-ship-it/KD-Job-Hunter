@@ -98,3 +98,35 @@ Rules:
             "tailored_cover_letter": "",
             "error": str(e),
         }
+
+
+def prepare_application(job: dict, profile: dict) -> dict:
+    """Prepare grounded content before autonomous Apply, without invented claims.
+
+    Preserve the applicant's resume file. Select matching skills verbatim and
+    create a per-job cover letter from those facts, rather than trusting earlier
+    generated prose as verified applicant data.
+    """
+    from pathlib import Path
+    import re
+    from utils.autonomous import Blocked
+    from utils import tracker
+
+    resume = profile.get("resume_path")
+    if not resume or not Path(resume).is_file():
+        raise Blocked("Resume missing. Required action: configure resume_path with a readable applicant resume.")
+    with Path(resume).open("rb") as source:
+        if not source.read(1):
+            raise Blocked("Resume is empty. Required action: provide the applicant resume.")
+    description = job.get("description") or ""
+    skills = profile.get("skills", {})
+    matching = [skill for skill in skills.get("primary", []) + skills.get("secondary", [])
+                if isinstance(skill, str) and re.search(r"(?<!\w)" + re.escape(skill) + r"(?!\w)", description, re.I)]
+    letter = f"I am applying for the {job['title']} position at {job['company']}."
+    if matching:
+        letter += " My skills include " + ", ".join(dict.fromkeys(matching)) + "."
+    letter += " Please find my resume attached. Thank you for considering my application."
+    prepared = {"strategy": "trusted_profile_facts", "resume_path": str(resume),
+                "emphasis_areas": matching, "tailored_cover_letter": letter}
+    tracker.update_tailored_resume(job["id"], prepared)
+    return dict(job, cover_letter=letter)

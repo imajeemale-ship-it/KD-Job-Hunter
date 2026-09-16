@@ -15,6 +15,7 @@ import json
 import time
 import random
 import asyncio
+import re
 import logging
 import hashlib
 from pathlib import Path
@@ -23,7 +24,8 @@ from typing import Optional
 from urllib.parse import urlparse
 
 from utils.brain import ClaudeBrain
-from utils.answers import find_cached_answer, get_personal_field
+from utils.answers import find_cached_answer, get_personal_field, trusted_answer
+from utils.autonomous import Blocked
 
 logger = logging.getLogger("stagehand_adapter")
 
@@ -196,10 +198,10 @@ async def get_form_snapshot(page) -> tuple:
                     'aria-label': el.getAttribute('aria-label') || '',
                     role: el.getAttribute('role') || '',
                     value: (el.tagName === 'SELECT') ? '' : (el.value || ''),
-                    required: el.required || false,
-                    label: label.substring(0, 200),
+                    required: el.required || el.getAttribute('aria-required') === 'true',
+                    label: label,
                     xpath: getXPath(el),
-                    visible: el.offsetParent !== null || el.type === 'hidden',
+                    visible: !el.disabled && (el.getClientRects().length > 0 || el.type === 'hidden'),
                     options: el.tagName === 'SELECT'
                         ? Array.from(el.options).map(o => ({value: o.value, text: o.text.trim()}))
                         : [],
@@ -1231,27 +1233,14 @@ async def _fill_form_step(
             continue
 
         if purpose == "custom":
-            # Custom question: use cached answers -> personal fields -> AI
-            question_text = field.get("custom_question", field_name)
-
-            # Try cached answer
-            cached_answer = find_cached_answer(question_text, common)
-            if cached_answer:
-                value = cached_answer
-            else:
-                # Try personal field mapping
-                personal_val = get_personal_field(question_text, personal)
-                if personal_val:
-                    value = personal_val
-                else:
-                    # Fall back to AI
-                    try:
-                        value = brain.answer_question(question_text, profile)
-                        if value:
-                            value = value.strip()
-                    except Exception as e:
-                        logger.debug(f"AI answer failed for '{question_text}': {e}")
-                        value = None
+            from utils.autonomous import Blocked, blocker
+            question_text = field.get("custom_question") or field_name
+            reason = blocker(question_text, profile)
+            if reason:
+                raise Blocked(reason)
+            value = trusted_answer(question_text, profile)
+            if value is None:
+                raise Blocked(f"Question: {question_text}. Required action: provide a verified answer in verified_answers.")
 
         if value is None:
             continue
@@ -1469,6 +1458,7 @@ async def apply_stagehand(
     cover_letter: str = "",
     dry_run: bool = True,
     max_steps: int = 12,
+    before_submit=None,
 ) -> bool:
     """
     Self-healing AI form filler using Playwright + Claude CLI.
@@ -1493,6 +1483,8 @@ async def apply_stagehand(
     Returns:
         True on success/dry-run, False on failure
     """
+    if before_submit is not None:
+        return await _apply_trusted(page, job_url, profile, brain, cover_letter, dry_run, max_steps, before_submit)
     personal = profile.get("personal", {})
     common = profile.get("common_answers", {})
 
@@ -1662,6 +1654,7 @@ async def apply_smart(
     company: str = "",
     title: str = "",
     description: str = "",
+    before_submit=None,
 ) -> bool:
     """
     Intelligent adapter router with cascading fallbacks.
@@ -1725,6 +1718,12 @@ async def apply_smart(
                 print(f"      Company careers page: {resolution['company_careers']}")
             return False
 
+    if before_submit is not None:
+        # No cascading adapters after an uncertain click, and no adapters that
+        # can generate factual answers. Exceptions reach the queue unchanged.
+        return await apply_stagehand(page, job_url, profile, brain,
+            cover_letter=cover_letter, dry_run=dry_run, before_submit=before_submit)
+
     url_lower = job_url.lower()
 
     # Greenhouse: use purpose-built adapter (most reliable for this ATS)
@@ -1740,6 +1739,8 @@ async def apply_smart(
                 return True
             # Greenhouse adapter failed — fall through to CLI adapter
             print("  [!] Greenhouse adapter failed, trying CLI adapter...")
+        except Blocked:
+            raise
         except Exception as e:
             print(f"  [!] Greenhouse adapter error: {e}, trying CLI adapter...")
 
@@ -1755,6 +1756,8 @@ async def apply_smart(
                 return True
             # CLI adapter failed — fall through to generic
             print("  [!] CLI adapter failed, trying generic adapter...")
+        except Blocked:
+            raise
         except Exception as e:
             print(f"  [!] CLI adapter error: {e}, trying generic adapter...")
 
@@ -1765,3 +1768,131 @@ async def apply_smart(
         page, job_url, profile, brain,
         cover_letter=cover_letter, dry_run=dry_run
     )
+
+
+async def _fill_trusted_fields(page, fields, profile, cover_letter):
+    """Use actual DOM labels, not model-assigned purposes, to resolve facts."""
+    from utils.autonomous import Blocked, blocker
+    for field in fields:
+        if field.get("tag") == "button" or field.get("type") in ("submit", "button", "reset", "hidden") or field.get("role") == "button":
+            continue
+        label = field.get("label") or field.get("aria-label") or field.get("placeholder") or field.get("name") or field.get("id") or "Unlabelled field"
+        selector = "xpath=" + field["xpath"]
+        control = page.locator(selector)
+        reason = blocker(label, profile)
+        if reason:
+            raise Blocked(reason)
+        if field.get("type") == "file":
+            if re.fullmatch(r"(?:upload )?(?:your )?(?:resume|cv)(?: upload)?[ *:]*", label, re.I):
+                path = profile.get("resume_path")
+                if not path or not Path(path).is_file():
+                    raise Blocked(f"Question: {label}. Required action: configure a readable resume_path.")
+                await control.set_input_files(path)
+                continue
+            raise Blocked(f"Question: {label}. Required action: provide the requested verified document.")
+        value = trusted_answer(label, profile)
+        if value is None and re.fullmatch(r"cover[ _-]?letter[ *:]*", label, re.I):
+            value = cover_letter or None
+        if value is None:
+            raise Blocked(f"Question: {label}. Required action: provide an exact answer in verified_answers.")
+        role = field.get("role")
+        if field.get("type") == "checkbox" or role == "checkbox":
+            if value.lower() not in ("yes", "true", "1", "no", "false", "0"):
+                raise Blocked(f"Question: {label}. Required action: provide an explicit yes/no answer.")
+            await control.set_checked(value.lower() in ("yes", "true", "1"))
+        elif field.get("type") == "radio" or role == "radio":
+            # Radio labels describe choices, not questions. Require an exact
+            # per-control boolean rather than clicking an arbitrary option.
+            if value.lower() not in ("yes", "true", "1", "no", "false", "0"):
+                raise Blocked(f"Question: {label}. Required action: specify this radio choice as yes/no.")
+            if value.lower() in ("yes", "true", "1"):
+                await control.check()
+        elif field.get("tag") == "select":
+            options = field.get("options", [])
+            matches = [o for o in options if value.casefold() in (o["text"].casefold(), o["value"].casefold())]
+            if len(matches) != 1:
+                raise Blocked(f"Question: {label}. Required action: select an exact allowed option: {[o['text'] for o in options]}.")
+            await control.select_option(value=matches[0]["value"])
+        elif role in ("combobox", "listbox"):
+            # Never fuzzy-match an option to a sensitive factual answer.
+            await control.fill(value)
+            option = page.get_by_role("option", name=value, exact=True)
+            if await option.count() != 1:
+                raise Blocked(f"Question: {label}. Required action: select the exact option for {value}.")
+            await option.click()
+        else:
+            await control.fill(value)
+            if await control.input_value() != value:
+                raise RuntimeError(f"Field failed verification: {label}")
+
+
+async def _verification_step(page):
+    """Detect visible challenge controls; never search the job description."""
+    from utils.autonomous import Blocked
+    challenges = page.locator('iframe[src*="recaptcha"], iframe[src*="hcaptcha"], iframe[title*="challenge" i], [data-sitekey], input[autocomplete="one-time-code"]')
+    for i in range(await challenges.count()):
+        if await challenges.nth(i).is_visible():
+            raise Blocked("Verification step: CAPTCHA/MFA. Required action: complete the visible challenge.")
+    actions = page.get_by_role("button", name=re.compile(r"^(?:start|begin|take|complete) (?:the )?assessment$", re.I))
+    for i in range(await actions.count()):
+        if await actions.nth(i).is_visible():
+            raise Blocked("Assessment step. Required action: complete the employer assessment.")
+
+
+async def _apply_trusted(page, job_url, profile, brain, cover_letter, dry_run, max_steps, before_submit):
+    """Strict autonomous path in the existing adapter; one final click only."""
+    await page.goto(job_url, wait_until="domcontentloaded", timeout=30000)
+    visited = set()
+    for _ in range(max_steps):
+        await _verification_step(page)
+        frame, _ = await _find_form_in_iframes(page)
+        if frame is not page:
+            await _verification_step(frame)
+        _, fields = await get_form_snapshot(frame)
+        if not fields:
+            raise RuntimeError("No application controls found; retry form discovery.")
+        signature = (frame.url, tuple((f.get("xpath"), f.get("label"), f.get("type")) for f in fields))
+        if signature in visited:
+            raise RuntimeError("Wizard returned to the same form step; refusing to click it again.")
+        visited.add(signature)
+        await _fill_trusted_fields(frame, fields, profile, cover_letter)
+        # Prefer actual button labels. AI may interpret navigation only; it cannot
+        # supply facts, skip unknown fields, or establish submission success.
+        submit = frame.get_by_role("button", name=re.compile(r"^(submit(?: application)?|send application|apply(?: now)?)$", re.I))
+        next_button = frame.get_by_role("button", name=re.compile(r"^(next|continue|save & continue)$", re.I))
+        if await submit.count() == 1 and await submit.is_visible():
+            if dry_run:
+                return True
+            # Reject pre-existing confirmation text; success must appear after click.
+            before = await frame.locator("body").inner_text()
+            before_submit(page.url)
+            await submit.click(timeout=10000)
+            # One click only, including timeout/transport errors. The worker fence
+            # protects every ambiguous outcome from retry or adapter fallback.
+            from utils.autonomous import SUCCESS, verified
+            try:
+                await frame.wait_for_function("phrases => phrases.some(p => document.body.innerText.toLowerCase().includes(p))", arg=list(SUCCESS), timeout=10000)
+            except Exception:
+                pass
+            after = await frame.locator("body").inner_text()
+            added_lines = "\n".join(line for line in after.splitlines() if line not in before.splitlines())
+            evidence = next((line for line in added_lines.splitlines() if verified(line)), "")
+            page._kd_confirmation_text = evidence
+            return bool(evidence)
+        if await next_button.count() == 1 and await next_button.is_visible():
+            before = await frame.locator("body").inner_text()
+            if dry_run and await next_button.get_attribute("type") != "button":
+                raise RuntimeError("Dry run cannot click submit-type wizard navigation.")
+            # Next/Continue advances the wizard, not the final application.
+            # Keep this phase retryable; only the final submit branch fences.
+            await next_button.click(timeout=10000)
+            await frame.wait_for_function("before => document.body.innerText !== before", arg=before, timeout=10000)
+            after = await frame.locator("body").inner_text()
+            from utils.autonomous import verified
+            evidence = next((line for line in after.splitlines() if line not in before.splitlines() and verified(line)), "")
+            if not dry_run and evidence:
+                page._kd_confirmation_text = evidence
+                return True
+            continue
+        raise RuntimeError("No unique application navigation control found.")
+    raise RuntimeError("Application wizard exceeded configured step limit.")

@@ -42,3 +42,7 @@ profile.yaml
 
 # Broken empty directory
 {adapters,utils}/
+
+# Persistent SQLite directory and worker lock
+data/
+*.worker.lock

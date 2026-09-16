@@ -388,6 +388,9 @@ Examples:
     # rescore
     subparsers.add_parser("rescore", help="Re-score all unscored jobs")
 
+    # autonomous one-cycle operation
+    subparsers.add_parser("autonomous", help="Run one autonomous queue cycle")
+
     # server
     server_parser = subparsers.add_parser("server", help="Launch web dashboard")
     server_parser.add_argument("--port", type=int, default=8080, help="Port (default: 8080)")
@@ -415,6 +418,9 @@ Examples:
         asyncio.run(cmd_single(profile, args.url, dry_run=dry_run))
     elif args.command == "rescore":
         asyncio.run(cmd_rescore(profile))
+    elif args.command == "autonomous":
+        from utils.autonomous import cycle
+        print(asyncio.run(cycle(profile, load_profile=load_profile)))
     elif args.command == "server":
         from dashboard.server import run_server
         try:

@@ -178,3 +178,11 @@ fastapi, uvicorn, jinja2, apscheduler
 ```
 
 Install: `pip install -r requirements.txt && playwright install chromium`
+
+## Autonomous mode
+
+The scheduler runs `utils/autonomous.py` while `autonomous.enabled` is true. Each tick reloads the profile; `autonomous.paused` is the kill switch and is checked again before submission. Keep `live_submit: false` for dry runs. The worker uses a durable SQLite queue, an OS worker lock, and a persisted submit fence. Only a new post-click confirmation records applied; uncertain submissions never automatically retry. Pre-submit failures back off to `max_attempts`, then become operational `FAILED` items. `NEEDS_KD` is reserved for exact missing applicant answers/actions or genuinely uncertain submissions/deliveries.
+
+Actual form labels are resolved against profile/common answers and exact `verified_answers`; never infer unknown facts with a model or scan job descriptions for blockers. Per-job preparation uses the applicant's existing resume and exact profile skills. Verified success atomically queues follow-up. `autonomous.follow_up` controls SMTP delivery, verified contacts, spacing and maximum stages. Only accepted delivery increments followups_sent; no employer response is inferred. Inspect `/api/autonomous/queue` and `/api/autonomous/metrics`.
+
+Docker persists SQLite and its WAL files together in `./data`; migrate the old database before switching (README has steps). `MRJOBS_DB_PATH` overrides the default local database path. Restart recovery safely retries pre-submit work and preserves post-submit fences. Do not clear a fence without portal/email evidence proving that submission did not happen. See README for configuration, test commands, and recovery.

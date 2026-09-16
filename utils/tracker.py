@@ -5,11 +5,12 @@ Extended with dashboard-ready queries, schema migration, and event broadcasting.
 """
 
 import sqlite3
+import os
 import json
 from datetime import datetime, date
 from pathlib import Path
 
-DB_PATH = Path(__file__).parent.parent / "applications.db"
+DB_PATH = Path(os.environ.get("MRJOBS_DB_PATH", str(Path(__file__).parent.parent / "applications.db")))
 
 # All valid statuses
 VALID_STATUSES = [
@@ -56,6 +57,11 @@ def get_db() -> sqlite3.Connection:
             ignored_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     """)
+    conn.execute("""CREATE TABLE IF NOT EXISTS application_status_events (
+        job_id TEXT NOT NULL, status TEXT NOT NULL, detected_at TEXT NOT NULL,
+        PRIMARY KEY(job_id,status))""")
+    conn.execute("""INSERT OR IGNORE INTO application_status_events
+        SELECT id, 'interviewing', CURRENT_TIMESTAMP FROM applications WHERE status='interviewing'""")
     # Schema migration: add new columns if they don't exist
     _migrate_schema(conn)
     conn.commit()
@@ -185,14 +191,17 @@ def log_skipped(job_id: str, reason: str) -> None:
 
 
 def get_today_count() -> int:
-    """How many applications have been submitted today."""
+    """Successful submissions remain counted after later status changes."""
     conn = get_db()
-    row = conn.execute("""
-        SELECT COUNT(*) as cnt FROM applications
-        WHERE status = 'applied' AND DATE(applied_at) = DATE('now')
-    """).fetchone()
-    conn.close()
-    return row["cnt"]
+    try:
+        if conn.execute("SELECT 1 FROM sqlite_master WHERE name='execution_events'").fetchone():
+            return conn.execute("""SELECT COUNT(DISTINCT id) FROM (
+                SELECT job_id AS id FROM execution_events WHERE action='apply' AND outcome='VERIFIED' AND DATE(timestamp)=DATE('now')
+                UNION SELECT id FROM applications WHERE applied_at IS NOT NULL AND status!='failed' AND DATE(applied_at)=DATE('now')
+            )""").fetchone()[0]
+        return conn.execute("SELECT COUNT(*) FROM applications WHERE applied_at IS NOT NULL AND status!='failed' AND DATE(applied_at)=DATE('now')").fetchone()[0]
+    finally:
+        conn.close()
 
 
 def get_stats() -> dict:
@@ -343,7 +352,9 @@ def update_job_status(job_id: str, status: str) -> bool:
         return False
     conn = get_db()
     try:
-        conn.execute("UPDATE applications SET status = ? WHERE id = ?", (status, job_id))
+        changed = conn.execute("UPDATE applications SET status = ? WHERE id = ?", (status, job_id)).rowcount
+        if changed:
+            conn.execute("INSERT OR IGNORE INTO application_status_events VALUES (?,?,?)", (job_id, status, datetime.now().isoformat()))
         conn.commit()
     finally:
         conn.close()
